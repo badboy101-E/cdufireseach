@@ -57,41 +57,83 @@ The custom MCP service lives under [cdufireseach/](./cdufireseach) and provides 
 
 The runtime flow is:
 
-```text
-Low-code platform / MCP client
-  -> cdufireseach MCP service
-  -> self-hosted Firecrawl API
-  -> Chengdu University main site and secondary sites
+```mermaid
+flowchart LR
+    A["Low-code platform / MCP client"] --> B["cdufireseach MCP service<br/>HTTP Streamable :3100"]
+    B --> C["Self-hosted Firecrawl API :3002"]
+    C --> D["Playwright service"]
+    C --> E["Redis / RabbitMQ / Postgres"]
+    C --> F["成都大学主站与二级网站<br/>cdu.edu.cn / nic.cdu.edu.cn / computer.cdu.edu.cn ..."]
 ```
 
-Ports used by default:
+Typical request path:
+
+```text
+User question
+  -> ask_cdu_site
+  -> infer matched CDU subsite
+  -> Firecrawl scrape
+  -> page analysis / direct extraction
+  -> MCP response
+```
+
+The self-hosted Docker stack started from [docker-compose.yml](./docker-compose.yml)
+includes:
+
+- `firecrawl-api`
+- `playwright-service`
+- `redis`
+- `rabbitmq`
+- `nuq-postgres`
+- `firecrawl-mcp`
+
+The custom MCP service in [cdufireseach/](./cdufireseach) runs separately and
+talks to the Firecrawl API at port `3002`.
+
+Default ports:
 
 - `3100`: custom MCP service `cdufireseach`
 - `3002`: self-hosted Firecrawl API
-- `3000`: generic Firecrawl MCP adapter from the official Firecrawl stack
+- `3000`: official Firecrawl MCP adapter from the Docker stack
 
-For this repository, the main integration target is usually:
+For this repository, the main MCP endpoint you usually connect to is:
 
 - `http://<host>:3100/mcp`
 
-## Quick Start
+## Startup Flow
 
-### 1. Start the self-hosted Firecrawl backend
+There are two startup steps:
+
+### Step 1. Start the Firecrawl backend Docker services
+
+From the repository root:
 
 ```bash
 cp .env.example .env
 docker compose up -d
 ```
 
-Useful checks:
+Check whether the backend is healthy:
 
 ```bash
 docker compose ps
 docker compose logs --tail=200 firecrawl-api
 docker compose logs --tail=200 firecrawl-mcp
+curl http://127.0.0.1:3002/health
 ```
 
-### 2. Start the custom MCP service
+If you want to verify scraping directly:
+
+```bash
+curl -X POST http://127.0.0.1:3002/v2/scrape \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://nic.cdu.edu.cn/",
+    "formats": ["markdown"]
+  }'
+```
+
+### Step 2. Start the custom `cdufireseach` MCP service
 
 ```bash
 cd cdufireseach
@@ -101,13 +143,13 @@ npm run build
 npm start
 ```
 
-Health check:
+Check the MCP service:
 
 ```bash
 curl http://127.0.0.1:3100/healthz
 ```
 
-### 3. Connect your MCP client
+### Step 3. Connect your MCP client or low-code platform
 
 Use:
 
