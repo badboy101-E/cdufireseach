@@ -1,190 +1,194 @@
 # cdufireseach
 
-This folder contains the initial deployment assets for `cdufireseach`.
+`cdufireseach` is a Chengdu University (`cdu.edu.cn`) MCP project built on top
+of a self-hosted Firecrawl stack.
 
-At this stage it includes:
+This repository has two layers:
 
-- a root Docker Compose deployment for the self-hosted Firecrawl backend
-- a generic self-hosted Firecrawl MCP adapter
-- a separate `cdufireseach/` TypeScript MCP service skeleton for Chengdu University queries
+- a self-hosted Firecrawl backend deployment
+- a custom TypeScript MCP service focused on Chengdu University secondary sites
 
-The target use case is a low-code platform that can connect to a remote MCP
-endpoint over HTTP and query Chengdu University website content through a
-specialized MCP service.
+The target scenario is a low-code platform or AI agent platform that can
+connect to MCP over `Streamable HTTP` and ask questions such as:
 
-## Project layout
+- `信息网络中心在哪里？`
+- `计算机学院首页有哪些主要栏目？`
+- `成都大学有哪些院系二级网站？`
 
-- root deployment files: self-hosted Firecrawl backend and generic MCP adapter
-- `cdufireseach/`: TypeScript MCP service for Chengdu University website queries
-- `CDU_MCP_DESIGN.md`: domain design draft and tool contract
+## What It Does
 
-## Root deployment stack
+This project is designed to:
 
-- `firecrawl-api`: main Firecrawl API
-- `playwright-service`: browser rendering service used by Firecrawl
-- `redis`: queue and rate-limit backing store
-- `rabbitmq`: worker queue broker
-- `nuq-postgres`: internal PostgreSQL used by Firecrawl
-- `firecrawl-mcp`: MCP adapter that points at the self-hosted Firecrawl API
+- discover Chengdu University secondary websites from `组织机构` and `院系设置`
+- locate the most relevant secondary site from a natural-language question
+- scrape the matched site through self-hosted Firecrawl
+- return either:
+  - a direct answer when the page contains one
+  - or a clear `没有找到` style response with analysis steps explaining why
 
-## Custom MCP service
+The current implementation already supports:
 
-The custom Chengdu University MCP service lives in:
+- secondary site catalog discovery
+- site lookup by organization or department name
+- homepage content extraction
+- site question answering with lightweight analysis traces
 
-- `cdufireseach/`
+## Repository Structure
 
-It currently provides a runnable MCP skeleton with HTTP Streamable and stdio
-transports, plus stubbed tools for:
+Key paths:
 
-- organization structure
-- department list
-- department site lookup
-- department profile
+- [cdufireseach/](./cdufireseach): custom MCP server
+- [docker-compose.yml](./docker-compose.yml): self-hosted Firecrawl deployment
+- [CDU_MCP_DESIGN.md](./CDU_MCP_DESIGN.md): initial design draft
+- [.env.example](./.env.example): root deployment environment template
 
-The next implementation step is to replace the stub adapter with a real
-Firecrawl-backed adapter.
+The custom MCP service lives under [cdufireseach/](./cdufireseach) and provides these MCP tools:
 
-## Before you start
+- `get_cdu_site_catalog`
+- `find_cdu_site`
+- `get_cdu_site_content`
+- `ask_cdu_site`
+- `get_org_structure`
+- `get_departments`
+- `find_department_site`
+- `get_department_profile`
 
-You need:
+## Architecture
 
-- Docker with Compose v2
-- enough host resources for browser workloads
-  - recommended starting point: 4 CPU cores, 8 GB RAM
-- optional: an OpenAI-compatible API key if you want structured extraction or
-  JSON scrape formats powered by an LLM
+The runtime flow is:
 
-## Quick start
+```text
+Low-code platform / MCP client
+  -> cdufireseach MCP service
+  -> self-hosted Firecrawl API
+  -> Chengdu University main site and secondary sites
+```
 
-1. Create your environment file:
+Ports used by default:
+
+- `3100`: custom MCP service `cdufireseach`
+- `3002`: self-hosted Firecrawl API
+- `3000`: generic Firecrawl MCP adapter from the official Firecrawl stack
+
+For this repository, the main integration target is usually:
+
+- `http://<host>:3100/mcp`
+
+## Quick Start
+
+### 1. Start the self-hosted Firecrawl backend
 
 ```bash
 cp .env.example .env
-```
-
-2. Edit `.env` and set at least:
-
-- `BULL_AUTH_KEY`
-- `POSTGRES_PASSWORD`
-- `OPENAI_API_KEY` if you want AI extraction features
-
-3. Start the stack:
-
-```bash
 docker compose up -d
 ```
-
-4. Follow logs during first boot:
-
-```bash
-docker compose logs -f firecrawl-api firecrawl-mcp
-```
-
-## Endpoints
-
-- Firecrawl API: `http://<host>:3002`
-- Firecrawl queue admin: `http://<host>:3002/admin/<BULL_AUTH_KEY>/queues`
-- MCP endpoint: `http://<host>:3000/v2/mcp`
-
-Some Firecrawl MCP documentation and older README snippets still reference
-`/mcp` for local mode. If your client gets a 404 on `/v2/mcp`, test
-`http://<host>:3000/mcp` before assuming the service is down.
-
-## Low-code platform MCP configuration
-
-Use:
-
-- Transport: `HTTP Streamable`
-- URL: `http://<your-host>:3000/v2/mcp`
-- Authentication: `None`
-
-If your platform requires an auth layer in front of MCP, place Nginx, Caddy, or
-your API gateway in front of port `3000` and enforce auth there.
-
-## Firecrawl API smoke tests
-
-Scrape a page:
-
-```bash
-curl -X POST http://localhost:3002/v2/scrape \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "url": "https://firecrawl.dev",
-    "formats": ["markdown"]
-  }'
-```
-
-Search the web:
-
-```bash
-curl -X POST http://localhost:3002/v2/search \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "query": "firecrawl",
-    "limit": 3
-  }'
-```
-
-## MCP smoke test
-
-Your low-code platform is the real MCP client, but operationally you mainly
-need to verify that the MCP container is listening and that the Firecrawl API is
-reachable behind it.
 
 Useful checks:
 
 ```bash
 docker compose ps
-docker compose logs --tail=200 firecrawl-mcp
 docker compose logs --tail=200 firecrawl-api
+docker compose logs --tail=200 firecrawl-mcp
 ```
 
-## Production notes
-
-- Put both `3000` and `3002` behind HTTPS before exposing them outside a trusted
-  network.
-- Keep PostgreSQL internal only. This compose file does not publish it.
-- Change `BULL_AUTH_KEY` immediately if the deployment is reachable by others.
-- Self-hosted Firecrawl does not include Firecrawl cloud's advanced anti-bot
-  capabilities. Tougher targets may require your own proxy setup.
-- Official self-host docs note that self-hosted `/search` uses Google by
-  default. In restricted or private environments, set `SEARXNG_ENDPOINT` to
-  your own SearXNG instance instead.
-- Firecrawl MCP docs say `FIRECRAWL_API_KEY` is optional in self-hosted mode,
-  but some versions have been reported to behave better when the variable is
-  still set to a non-empty placeholder. This stack keeps a local value for that
-  reason.
-
-## Useful commands
-
-Restart just the MCP layer:
+### 2. Start the custom MCP service
 
 ```bash
-docker compose restart firecrawl-mcp
+cd cdufireseach
+cp .env.example .env
+npm install
+npm run build
+npm start
 ```
 
-Update images:
+Health check:
 
 ```bash
-docker compose pull
-docker compose up -d
+curl http://127.0.0.1:3100/healthz
 ```
 
-Stop everything:
+### 3. Connect your MCP client
+
+Use:
+
+- Transport: `HTTP Streamable`
+- URL: `http://127.0.0.1:3100/mcp`
+
+If your platform supports a JSON config entry, it will typically look like:
+
+```json
+{
+  "mcpServers": {
+    "cdufireseach": {
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:3100/mcp"
+    }
+  }
+}
+```
+
+## Example Questions
+
+These are representative questions the MCP service is built to handle:
+
+- `信息网络中心在哪里？`
+- `网络信息中心在哪里？`
+- `信息网络中心的联系电话是什么？`
+- `成都大学有哪些院系二级网站？`
+- `计算机学院官网是什么？`
+- `计算机学院首页有哪些主要栏目？`
+
+## Local Test Script
+
+The repository includes a local smoke-test script:
+
+- [cdufireseach/scripts/test-mcp.sh](./cdufireseach/scripts/test-mcp.sh)
+
+Example:
 
 ```bash
-docker compose down
+QUESTION="网络信息中心在哪里？" ./cdufireseach/scripts/test-mcp.sh
 ```
 
-Stop everything and remove database data:
+If you want to force a specific site during debugging:
 
 ```bash
-docker compose down -v
+SITE_NAME="信息网络中心" QUESTION="信息网络中心在哪里？" ./cdufireseach/scripts/test-mcp.sh
 ```
 
-## Source references
+## Firecrawl Notes
 
-- Firecrawl self-hosting guide: https://docs.firecrawl.dev/contributing/self-host
-- Firecrawl MCP guide: https://docs.firecrawl.dev/mcp-server
-- Firecrawl repository: https://github.com/firecrawl/firecrawl
-- Firecrawl MCP repository: https://github.com/firecrawl/firecrawl-mcp-server
+This repository uses self-hosted Firecrawl rather than Firecrawl Cloud.
+
+In this environment, an important deployment detail was:
+
+- `ALLOW_LOCAL_WEBHOOKS=true`
+
+That was needed because the target site resolved to a reserved address range in
+the container network, and Firecrawl's default safe-fetch protection blocked the
+requests.
+
+## Current Status
+
+Current state of the project:
+
+- self-hosted Firecrawl backend is up
+- custom MCP service is running in Firecrawl-only mode
+- stub fallback has been removed from the runtime path
+- natural-language question to site matching is working
+- address / phone / email style questions now use direct text extraction in
+  addition to model-based analysis
+
+## Next Improvements
+
+- improve secondary-site matching for more aliases and wording variations
+- clean extracted answers further so footer text is even tidier
+- add persistent cache or storage for lower scrape cost and more stable answers
+- add focused tests for parser and extraction logic
+
+## References
+
+- [Firecrawl Repository](https://github.com/firecrawl/firecrawl)
+- [Firecrawl MCP Repository](https://github.com/firecrawl/firecrawl-mcp-server)
+- [Firecrawl MCP Docs](https://docs.firecrawl.dev/mcp-server)
+- [Self-Hosting Guide](https://docs.firecrawl.dev/contributing/self-host)
