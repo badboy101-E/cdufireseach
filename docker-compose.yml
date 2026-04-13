@@ -1,0 +1,137 @@
+name: cdufireseach
+
+services:
+  redis:
+    image: redis:alpine
+    command: ["redis-server", "--bind", "0.0.0.0"]
+    restart: unless-stopped
+    networks:
+      - backend
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    command: ["rabbitmq-server"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - backend
+
+  nuq-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    command:
+      [
+        "postgres",
+        "-c",
+        "cron.database_name=${POSTGRES_DB}",
+      ]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  playwright-service:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      PROXY_SERVER: ${PROXY_SERVER:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+      ALLOW_LOCAL_WEBHOOKS: ${ALLOW_LOCAL_WEBHOOKS:-false}
+      BLOCK_MEDIA: ${BLOCK_MEDIA:-false}
+      MAX_CONCURRENT_PAGES: ${CRAWL_CONCURRENT_REQUESTS:-10}
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=1g
+    networks:
+      - backend
+
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    command: ["node", "dist/src/harness.js", "--start-docker"]
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+      playwright-service:
+        condition: service_started
+      nuq-postgres:
+        condition: service_started
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3002
+      EXTRACT_WORKER_PORT: 3004
+      WORKER_PORT: 3005
+      ENV: local
+      USE_DB_AUTHENTICATION: ${USE_DB_AUTHENTICATION:-false}
+      BULL_AUTH_KEY: ${BULL_AUTH_KEY}
+      REDIS_URL: redis://redis:6379
+      REDIS_RATE_LIMIT_URL: redis://redis:6379
+      NUQ_RABBITMQ_URL: amqp://rabbitmq:5672
+      PLAYWRIGHT_MICROSERVICE_URL: http://playwright-service:3000/scrape
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_HOST: nuq-postgres
+      POSTGRES_PORT: 5432
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      MODEL_NAME: ${MODEL_NAME:-}
+      MODEL_EMBEDDING_NAME: ${MODEL_EMBEDDING_NAME:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      PROXY_SERVER: ${PROXY_SERVER:-}
+      PROXY_USERNAME: ${PROXY_USERNAME:-}
+      PROXY_PASSWORD: ${PROXY_PASSWORD:-}
+      SEARXNG_ENDPOINT: ${SEARXNG_ENDPOINT:-}
+      SEARXNG_ENGINES: ${SEARXNG_ENGINES:-}
+      SEARXNG_CATEGORIES: ${SEARXNG_CATEGORIES:-}
+      NUM_WORKERS_PER_QUEUE: ${NUM_WORKERS_PER_QUEUE:-8}
+      CRAWL_CONCURRENT_REQUESTS: ${CRAWL_CONCURRENT_REQUESTS:-10}
+      MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-5}
+      BROWSER_POOL_SIZE: ${BROWSER_POOL_SIZE:-5}
+      LOGGING_LEVEL: ${LOGGING_LEVEL:-info}
+      ALLOW_LOCAL_WEBHOOKS: ${ALLOW_LOCAL_WEBHOOKS:-false}
+    ports:
+      - "${FIRECRAWL_PUBLIC_PORT:-3002}:3002"
+    networks:
+      - backend
+
+  firecrawl-mcp:
+    image: node:20-alpine
+    working_dir: /app
+    command: ["sh", "-lc", "npx -y firecrawl-mcp"]
+    restart: unless-stopped
+    depends_on:
+      firecrawl-api:
+        condition: service_started
+    environment:
+      PORT: 3000
+      HTTP_STREAMABLE_SERVER: "true"
+      FIRECRAWL_API_URL: http://firecrawl-api:3002
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-local-dev-key}
+      FIRECRAWL_RETRY_MAX_ATTEMPTS: ${FIRECRAWL_RETRY_MAX_ATTEMPTS:-5}
+      FIRECRAWL_RETRY_INITIAL_DELAY: ${FIRECRAWL_RETRY_INITIAL_DELAY:-1000}
+      FIRECRAWL_RETRY_MAX_DELAY: ${FIRECRAWL_RETRY_MAX_DELAY:-10000}
+      FIRECRAWL_RETRY_BACKOFF_FACTOR: ${FIRECRAWL_RETRY_BACKOFF_FACTOR:-2}
+    ports:
+      - "${MCP_PUBLIC_PORT:-3000}:3000"
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  postgres_data:

@@ -1,0 +1,7 @@
+.DS_Store
+.env
+*.log
+
+cdufireseach/.env
+cdufireseach/node_modules
+cdufireseach/dist
