@@ -21,7 +21,7 @@ This project is designed to:
 
 - discover Chengdu University secondary websites from `组织机构` and `院系设置`
 - locate the most relevant secondary site from a natural-language question
-- scrape the matched site through self-hosted Firecrawl
+- recursively inspect the matched site through self-hosted Firecrawl
 - return either:
   - a direct answer when the page contains one
   - or a clear `没有找到` style response with analysis steps explaining why
@@ -29,9 +29,10 @@ This project is designed to:
 The current implementation already supports:
 
 - secondary site catalog discovery
-- site lookup by organization or department name
-- homepage content extraction
-- site question answering with lightweight analysis traces
+- site lookup by organization, alias, or department name
+- controlled recursive page discovery within the matched subsite
+- question-oriented extraction with lightweight analysis traces
+- focused field extraction for `办公地点 / 联系电话 / 邮箱` style questions
 
 ## Repository Structure
 
@@ -42,16 +43,9 @@ Key paths:
 - [CDU_MCP_DESIGN.md](./CDU_MCP_DESIGN.md): initial design draft
 - [.env.example](./.env.example): root deployment environment template
 
-The custom MCP service lives under [cdufireseach/](./cdufireseach) and provides these MCP tools:
+The custom MCP service lives under [cdufireseach/](./cdufireseach) and exposes one MCP tool:
 
-- `get_cdu_site_catalog`
-- `find_cdu_site`
-- `get_cdu_site_content`
-- `ask_cdu_site`
-- `get_org_structure`
-- `get_departments`
-- `find_department_site`
-- `get_department_profile`
+- `ask_cdu`
 
 ## Architecture
 
@@ -70,10 +64,11 @@ Typical request path:
 
 ```text
 User question
-  -> ask_cdu_site
+  -> ask_cdu
   -> infer matched CDU subsite
-  -> Firecrawl scrape
-  -> page analysis / direct extraction
+  -> recursive Firecrawl scrape within same site
+  -> prefer focused field extraction from the matched department/section block
+  -> fallback to page-level generic contact info only when needed
   -> MCP response
 ```
 
@@ -218,13 +213,15 @@ Current state of the project:
 - custom MCP service is running in Firecrawl-only mode
 - stub fallback has been removed from the runtime path
 - natural-language question to site matching is working
-- address / phone / email style questions now use direct text extraction in
-  addition to model-based analysis
+- only one MCP tool is exposed publicly: `ask_cdu`
+- recursive in-site page discovery is working with configurable depth/page limits
+- address / phone / email style questions prefer focused section-level fields
+  before falling back to footer or page-level contact information
 
 ## Next Improvements
 
 - improve secondary-site matching for more aliases and wording variations
-- clean extracted answers further so footer text is even tidier
+- add more page-layout-aware extraction rules for card or table based department pages
 - add persistent cache or storage for lower scrape cost and more stable answers
 - add focused tests for parser and extraction logic
 

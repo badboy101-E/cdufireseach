@@ -62,8 +62,17 @@ pretty_sse() {
 
 ensure_not_tool_error() {
   local file="$1"
-  if have_jq && jq -e '.result.isError == true' "$file" >/dev/null 2>&1; then
-    return 1
+  local extracted="$TMP_DIR/tool-check.json"
+  sed -n 's/^data: //p' "$file" >"$extracted"
+
+  if [[ -s "$extracted" ]]; then
+    if have_jq && jq -e '.result.isError == true' "$extracted" >/dev/null 2>&1; then
+      return 1
+    fi
+  else
+    if have_jq && jq -e '.result.isError == true' "$file" >/dev/null 2>&1; then
+      return 1
+    fi
   fi
   return 0
 }
@@ -183,60 +192,16 @@ if [[ -n "$SESSION_ID" ]]; then
     fail "tools/list failed."
   fi
 
-  section "get_cdu_site_catalog"
-  CATALOG_OUT="$TMP_DIR/catalog.out"
-  CATALOG_BODY='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_cdu_site_catalog","arguments":{}}}'
-  if post_json "$MCP_ENDPOINT" "$CATALOG_BODY" "$CATALOG_OUT" \
-    -H 'Accept: application/json, text/event-stream' \
-    -H "mcp-session-id: $SESSION_ID"; then
-    pretty_sse "$CATALOG_OUT"
-    ensure_not_tool_error "$CATALOG_OUT" || fail "get_cdu_site_catalog returned an MCP tool error."
-  else
-    fail "get_cdu_site_catalog failed."
-  fi
-
-  if [[ -n "$SITE_NAME" ]]; then
-    section "find_cdu_site"
-    FIND_OUT="$TMP_DIR/find.out"
-    FIND_BODY=$(cat <<JSON
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"find_cdu_site","arguments":{"keyword":"$SITE_NAME"}}}
-JSON
-)
-    if post_json "$MCP_ENDPOINT" "$FIND_BODY" "$FIND_OUT" \
-      -H 'Accept: application/json, text/event-stream' \
-      -H "mcp-session-id: $SESSION_ID"; then
-      pretty_sse "$FIND_OUT"
-      ensure_not_tool_error "$FIND_OUT" || fail "find_cdu_site returned an MCP tool error."
-    else
-      fail "find_cdu_site failed."
-    fi
-
-    section "get_cdu_site_content"
-    CONTENT_OUT="$TMP_DIR/content.out"
-    CONTENT_BODY=$(cat <<JSON
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_cdu_site_content","arguments":{"siteName":"$SITE_NAME"}}}
-JSON
-)
-    if post_json "$MCP_ENDPOINT" "$CONTENT_BODY" "$CONTENT_OUT" \
-      -H 'Accept: application/json, text/event-stream' \
-      -H "mcp-session-id: $SESSION_ID"; then
-      pretty_sse "$CONTENT_OUT"
-      ensure_not_tool_error "$CONTENT_OUT" || fail "get_cdu_site_content returned an MCP tool error."
-    else
-      fail "get_cdu_site_content failed."
-    fi
-  fi
-
-  section "ask_cdu_site"
+  section "ask_cdu"
   ASK_OUT="$TMP_DIR/ask.out"
   if [[ -n "$SITE_NAME" ]]; then
     ASK_BODY=$(cat <<JSON
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ask_cdu_site","arguments":{"question":"$QUESTION","siteName":"$SITE_NAME"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ask_cdu","arguments":{"question":"$QUESTION","siteName":"$SITE_NAME"}}}
 JSON
 )
   else
     ASK_BODY=$(cat <<JSON
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ask_cdu_site","arguments":{"question":"$QUESTION"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ask_cdu","arguments":{"question":"$QUESTION"}}}
 JSON
 )
   fi
@@ -244,9 +209,9 @@ JSON
     -H 'Accept: application/json, text/event-stream' \
     -H "mcp-session-id: $SESSION_ID"; then
     pretty_sse "$ASK_OUT"
-    ensure_not_tool_error "$ASK_OUT" || fail "ask_cdu_site returned an MCP tool error."
+    ensure_not_tool_error "$ASK_OUT" || fail "ask_cdu returned an MCP tool error."
   else
-    fail "ask_cdu_site failed."
+    fail "ask_cdu failed."
   fi
 fi
 

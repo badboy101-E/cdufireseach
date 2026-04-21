@@ -19,14 +19,30 @@ const firecrawlCacheTtlMs = Number.parseInt(
   process.env.FIRECRAWL_CACHE_TTL_MS ?? "1800000",
   10
 );
+const firecrawlMaxDiscoveryDepth = Number.parseInt(
+  process.env.FIRECRAWL_MAX_DISCOVERY_DEPTH ?? "2",
+  10
+);
+const firecrawlMaxDiscoveryPages = Number.parseInt(
+  process.env.FIRECRAWL_MAX_DISCOVERY_PAGES ?? "8",
+  10
+);
 
 function createAdapter(): FirecrawlAdapter {
-  console.log(`[cdufireseach] firecrawl-only mode; api: ${firecrawlApiUrl}`);
+  console.log(
+    `[cdufireseach] firecrawl-only mode; api: ${firecrawlApiUrl}; max-depth: ${firecrawlMaxDiscoveryDepth}; max-pages: ${firecrawlMaxDiscoveryPages}`
+  );
 
   return new FirecrawlApiAdapter({
     baseUrl: firecrawlApiUrl,
     apiKey: firecrawlApiKey,
-    cacheTtlMs: Number.isFinite(firecrawlCacheTtlMs) ? firecrawlCacheTtlMs : undefined
+    cacheTtlMs: Number.isFinite(firecrawlCacheTtlMs) ? firecrawlCacheTtlMs : undefined,
+    maxDiscoveryDepth: Number.isFinite(firecrawlMaxDiscoveryDepth)
+      ? firecrawlMaxDiscoveryDepth
+      : undefined,
+    maxDiscoveryPages: Number.isFinite(firecrawlMaxDiscoveryPages)
+      ? firecrawlMaxDiscoveryPages
+      : undefined
   });
 }
 
@@ -68,7 +84,9 @@ async function startHttpServer(): Promise<void> {
       version: SERVER_VERSION,
       transport: "http",
       data_mode: "firecrawl",
-      firecrawl_api_url: firecrawlApiUrl
+      firecrawl_api_url: firecrawlApiUrl,
+      firecrawl_max_discovery_depth: firecrawlMaxDiscoveryDepth,
+      firecrawl_max_discovery_pages: firecrawlMaxDiscoveryPages
     });
   });
 

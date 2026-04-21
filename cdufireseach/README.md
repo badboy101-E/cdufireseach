@@ -7,21 +7,17 @@ This server now runs in Firecrawl-only mode:
 - No local stub or automatic fallback remains in the runtime path
 - HTTP Streamable transport is available for remote MCP hosts
 
-## Tools (MVP)
+## Tool
 
-- `get_cdu_site_catalog`
-- `find_cdu_site`
-- `get_cdu_site_content`
-- `ask_cdu_site`
-- `get_org_structure`
-- `get_departments`
-- `find_department_site`
-- `get_department_profile`
+- `ask_cdu`
 
-The new primary workflow is:
+The primary workflow is:
 - discover secondary sites from `组织机构` and `院系设置`
-- locate the target subsite by organization or department name
-- scrape that subsite and answer questions from its content
+- infer the most relevant target subsite from the user question
+- recursively inspect that subsite within a controlled depth/page budget
+- prefer focused section-level fields such as `办公地点 / 联系电话 / 邮箱`
+- fall back to generic page-level or footer contact information only when needed
+- answer from discovered page content, or return `没有` with analysis steps
 
 ## Quick Start
 
@@ -54,6 +50,8 @@ npm run start:stdio
 - `FIRECRAWL_API_URL`: self-hosted Firecrawl API base URL, default `http://localhost:3002`
 - `FIRECRAWL_API_KEY`: Firecrawl API key or local placeholder for self-hosted mode
 - `FIRECRAWL_CACHE_TTL_MS`: in-memory cache TTL for MCP responses
+- `FIRECRAWL_MAX_DISCOVERY_DEPTH`: recursive link depth for `ask_cdu`, default `2`
+- `FIRECRAWL_MAX_DISCOVERY_PAGES`: max pages checked per question, default `8`
 
 ## MCP Integration
 
@@ -78,6 +76,15 @@ Health check:
 ```text
 GET http://<your-host>:3100/healthz
 ```
+
+Typical `ask_cdu` response includes:
+
+- `answered`
+- `answer`
+- `evidence`
+- `analysis_steps`
+- `matched_site`
+- `source_urls`
 
 ### Local stdio host
 
@@ -106,6 +113,6 @@ src/
 
 ## TODO
 
-1. Expand parser coverage and harden extraction against future CDU page structure changes.
+1. Expand parser coverage and harden focused-field extraction against future CDU page structure changes.
 2. Add persistent cache or storage for stable responses and lower crawl cost.
-3. Add tests for parser logic and tool argument validation.
+3. Add tests for parser logic, tool behavior, and recursive discovery controls.

@@ -123,12 +123,15 @@ type PageAnswerResult = {
   evidence: string;
   analysisStep: string;
   sourceUrl: string;
+  discoveredLinks: LinkItem[];
 };
 
 type FirecrawlApiAdapterOptions = {
   apiKey?: string;
   baseUrl: string;
   cacheTtlMs?: number;
+  maxDiscoveryDepth?: number;
+  maxDiscoveryPages?: number;
 };
 
 function nowIso(): string {
@@ -219,9 +222,13 @@ function markdownLinksToNamedItems(markdown: string, baseUrl: string): LinkItem[
     if (/^(javascript:|mailto:|#)/i.test(rawUrl)) {
       continue;
     }
+    const cleanedUrl = cleanWebsiteUrl(rawUrl, baseUrl);
+    if (!cleanedUrl) {
+      continue;
+    }
     results.push({
       name,
-      url: resolveUrl(rawUrl, baseUrl)
+      url: cleanedUrl
     });
   }
 
@@ -253,6 +260,14 @@ function normalizeDepartmentCategory(name: string, category?: string | null): st
   return "其他";
 }
 
+function safeParseUrl(value: string): URL | null {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
+
 function markdownExcerpt(markdown: string, maxLength = 600): string {
   const text = markdown
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
@@ -270,10 +285,48 @@ function summarizeForAnalysis(markdown: string, maxLength = 120): string {
 function normalizeSearchText(value: string): string {
   return value
     .replace(/\s+/g, "")
-    .replace(/[？?！!。,.，、:：]/g, "")
+    .replace(/[？?！!。,.，、:：（）()【】\[\]]/g, "")
     .replace(/(在哪里|在哪儿|在哪|位置|地址|电话|邮箱|邮件|官网|网站|主页|首页|是什么|是哪里|多少|怎么走|联系电话)/g, "")
     .trim()
     .toLowerCase();
+}
+
+function expandSearchNames(name: string): string[] {
+  const results = new Set<string>();
+  const trimmed = name.trim();
+
+  if (!trimmed) {
+    return [];
+  }
+
+  results.add(trimmed);
+
+  const normalized = trimmed
+    .replace(/（/g, "(")
+    .replace(/）/g, ")")
+    .replace(/[【\[]/g, "(")
+    .replace(/[】\]]/g, ")");
+
+  results.add(normalized);
+  results.add(normalized.replace(/\(([^)]+)\)/g, "$1"));
+  results.add(normalized.replace(/\(([^)]+)\)/g, "").trim());
+
+  const parentheticalParts = [...normalized.matchAll(/\(([^)]+)\)/g)]
+    .map((match) => match[1]?.trim() ?? "")
+    .filter(Boolean);
+
+  for (const part of parentheticalParts) {
+    results.add(part);
+    for (const subPart of part.split(/[、,，/]/).map((item) => item.trim()).filter(Boolean)) {
+      results.add(subPart);
+    }
+  }
+
+  for (const piece of normalized.split(/[、,，/]/).map((item) => item.trim()).filter(Boolean)) {
+    results.add(piece);
+  }
+
+  return [...results].filter(Boolean);
 }
 
 function keywordToTokens(keyword: string): string[] {
@@ -333,6 +386,12 @@ function scoreSiteMatch(name: string, keyword: string): number {
   return tokenScore + characterCoverageScore(normalizedName, normalizedKeyword);
 }
 
+function scoreCatalogSiteMatch(site: CatalogSite, keyword: string): number {
+  return expandSearchNames(site.name).reduce((bestScore, candidateName) => {
+    return Math.max(bestScore, scoreSiteMatch(candidateName, keyword));
+  }, 0);
+}
+
 function extractAddressAnswer(markdown: string): string | null {
   const compact = markdown.replace(/\s+/g, " ").trim();
   const match = compact.match(/地址[：:]\s*([^。；;\n]{4,120})/u);
@@ -349,18 +408,243 @@ function extractEmailAnswer(markdown: string): string | null {
   return match?.[0] ?? null;
 }
 
-function extractHeuristicAnswer(question: string, markdown: string): string | null {
+type QuestionIntent = "location" | "phone" | "email" | "generic";
+
+function detectQuestionIntent(question: string): QuestionIntent {
   if (/(在哪|地址|位置)/.test(question)) {
-    return extractAddressAnswer(markdown);
+    return "location";
   }
   if (/(电话|联系电话|联系方式)/.test(question)) {
-    return extractPhoneAnswer(markdown);
+    return "phone";
   }
   if (/(邮箱|邮件|email)/i.test(question)) {
-    return extractEmailAnswer(markdown);
+    return "email";
+  }
+  return "generic";
+}
+
+function cleanAnswerText(value: string): string {
+  return value
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
+    .replace(/版权所有[:：]?\s*.+$/u, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[，,。；;]+$/u, "");
+}
+
+function normalizeMarkdownLines(markdown: string): string[] {
+  return markdown
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        !!line &&
+        !/^!\[[^\]]*\]\([^)]+\)$/.test(line) &&
+        !/^\[[^\]]+\]\([^)]+\)$/.test(line) &&
+        !/^(上一页|下一页|返回|关闭)$/.test(line)
+    );
+}
+
+function lineContainsFocusTerm(line: string, focusTerms: string[]): boolean {
+  return focusTerms.some((term) => line.includes(term));
+}
+
+function buildFocusWindows(lines: string[], focusTerms: string[]): string[] {
+  if (focusTerms.length === 0) {
+    return [];
+  }
+
+  const windows: string[] = [];
+  const usedRanges = new Set<string>();
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lineContainsFocusTerm(lines[index] ?? "", focusTerms)) {
+      continue;
+    }
+
+    const start = Math.max(0, index - 3);
+    const end = Math.min(lines.length, index + 8);
+    const key = `${start}:${end}`;
+    if (usedRanges.has(key)) {
+      continue;
+    }
+    usedRanges.add(key);
+    windows.push(lines.slice(start, end).join("\n"));
+  }
+
+  return windows;
+}
+
+function extractLabelValue(block: string, labels: string[]): string | null {
+  for (const label of labels) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const inlinePattern = new RegExp(`${escaped}[：:]\\s*([^\\n]{2,120})`, "u");
+    const inlineMatch = block.match(inlinePattern);
+    if (inlineMatch?.[1]) {
+      return cleanAnswerText(`${label}：${inlineMatch[1]}`);
+    }
+
+    const nextLinePattern = new RegExp(`${escaped}[：:]?\\s*\\n\\s*([^\\n]{2,120})`, "u");
+    const nextLineMatch = block.match(nextLinePattern);
+    if (nextLineMatch?.[1]) {
+      return cleanAnswerText(`${label}：${nextLineMatch[1]}`);
+    }
   }
 
   return null;
+}
+
+function extractFocusedAnswer(
+  question: string,
+  markdown: string,
+  focusTerms: string[]
+): string | null {
+  const intent = detectQuestionIntent(question);
+  const lines = normalizeMarkdownLines(markdown);
+  const focusBlocks = buildFocusWindows(lines, focusTerms);
+
+  if (focusBlocks.length === 0) {
+    return null;
+  }
+
+  for (const block of focusBlocks) {
+    if (intent === "location") {
+      const answer =
+        extractLabelValue(block, ["办公地点", "办公地址", "办公位置", "地点"]) ??
+        extractLabelValue(block, ["地址"]);
+      if (answer) {
+        return answer;
+      }
+    }
+
+    if (intent === "phone") {
+      const answer =
+        extractLabelValue(block, ["联系电话", "电话", "联系方式"]) ??
+        extractPhoneAnswer(block);
+      if (answer) {
+        return answer;
+      }
+    }
+
+    if (intent === "email") {
+      const answer =
+        extractLabelValue(block, ["邮箱", "Email", "电子邮箱"]) ??
+        extractEmailAnswer(block);
+      if (answer) {
+        return cleanAnswerText(answer);
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractHeuristicAnswer(
+  question: string,
+  markdown: string,
+  focusTerms: string[]
+): string | null {
+  const focusedAnswer = extractFocusedAnswer(question, markdown, focusTerms);
+  if (focusedAnswer) {
+    return focusedAnswer;
+  }
+
+  if (detectQuestionIntent(question) === "location") {
+    const directAnswer =
+      extractLabelValue(markdown, ["办公地点", "办公地址", "办公位置", "地点"]) ??
+      extractAddressAnswer(markdown);
+    return directAnswer ? cleanAnswerText(directAnswer) : null;
+  }
+  if (detectQuestionIntent(question) === "phone") {
+    const directAnswer =
+      extractLabelValue(markdown, ["联系电话", "电话", "联系方式"]) ??
+      extractPhoneAnswer(markdown);
+    return directAnswer ? cleanAnswerText(directAnswer) : null;
+  }
+  if (detectQuestionIntent(question) === "email") {
+    const directAnswer =
+      extractLabelValue(markdown, ["邮箱", "Email", "电子邮箱"]) ??
+      extractEmailAnswer(markdown);
+    return directAnswer ? cleanAnswerText(directAnswer) : null;
+  }
+
+  return null;
+}
+
+function isHtmlLikeUrl(url: string): boolean {
+  return !/\.(?:jpg|jpeg|png|gif|svg|webp|bmp|ico|pdf|docx?|xlsx?|pptx?|zip|rar|7z|mp3|mp4|avi|mov)(?:[?#].*)?$/i.test(
+    url
+  );
+}
+
+function isSameSiteUrl(candidateUrl: string, siteUrl: string): boolean {
+  const candidate = safeParseUrl(candidateUrl);
+  const site = safeParseUrl(siteUrl);
+
+  if (!candidate || !site) {
+    return false;
+  }
+
+  return candidate.hostname === site.hostname;
+}
+
+function scoreQuestionLink(question: string, linkName: string, url: string): number {
+  let score = 10;
+  const isContactQuestion = /(在哪|地址|位置|电话|邮箱|联系|办公室)/.test(question);
+
+  if (isContactQuestion && /(联系|关于|简介|概况|办公室|部门简介|中心简介|机构设置|联系我们)/.test(linkName)) {
+    score += 40;
+  }
+
+  if (question.includes(linkName)) {
+    score += 30;
+  }
+
+  if (/(通知|公告|新闻|动态)/.test(linkName) && /(在哪|地址|位置|电话|邮箱|联系|办公室)/.test(question)) {
+    score -= 10;
+  }
+
+  if (/index|home|default/i.test(url)) {
+    score += 5;
+  }
+
+  return score;
+}
+
+function extractQuestionFocusTerms(question: string, matchedSiteName: string): string[] {
+  let remainder = normalizeSearchText(question);
+  const aliases = expandSearchNames(matchedSiteName)
+    .map((item) => normalizeSearchText(item))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+
+  for (const alias of aliases) {
+    remainder = remainder.replace(alias, " ");
+  }
+
+  const cleaned = remainder.replace(/\s+/g, " ").trim();
+  const matches = [...cleaned.matchAll(/[\u4e00-\u9fa5]{1,12}(?:科|室|中心|办公室|部门)/g)]
+    .map((match) => match[0]?.trim() ?? "")
+    .filter(Boolean);
+
+  if (matches.length > 0) {
+    return [...new Set(matches)];
+  }
+
+  if (cleaned && cleaned.length >= 2 && cleaned.length <= 12) {
+    return [cleaned];
+  }
+
+  return [];
+}
+
+function pageMatchesFocusTerms(markdown: string, title: string, focusTerms: string[]): boolean {
+  if (focusTerms.length === 0) {
+    return true;
+  }
+
+  const haystack = `${title}\n${markdown}`;
+  return focusTerms.some((term) => haystack.includes(term));
 }
 
 function dedupeCatalogSites(items: CatalogSite[]): CatalogSite[] {
@@ -377,6 +661,51 @@ function dedupeCatalogSites(items: CatalogSite[]): CatalogSite[] {
   }
 
   return results;
+}
+
+function isLikelyInstitutionName(name: string): boolean {
+  if (!name || /^(首页|搜索|关闭|TOP|EN|学生|教职工|校友|访客|网络理政|VPN入口)$/.test(name)) {
+    return false;
+  }
+
+  return /(学院|研究院|中心|办公室|处|部|馆|委|所|医院|工会|团委|基金会|公司|大学附属|门户|大厅|系统|小学|幼儿园)/.test(
+    name
+  );
+}
+
+function parseSupplementalOrgLinksFromHtml(html: string): LinkItem[] {
+  const results: LinkItem[] = [];
+  const anchorPattern = /<a\s+[^>]*href="([^"]+)"([^>]*)>([\s\S]*?)<\/a>/gi;
+
+  for (const match of html.matchAll(anchorPattern)) {
+    const rawUrl = decodeHtmlEntities(match[1] ?? "").trim();
+    const attrs = match[2] ?? "";
+    const titleMatch = attrs.match(/title="([^"]+)"/i);
+    const title = stripHtmlTags(titleMatch?.[1] ?? "");
+    const text = stripHtmlTags(match[3] ?? "");
+    const name = title || text;
+    const cleanedUrl = cleanWebsiteUrl(rawUrl, ORG_URL);
+    const parsedUrl = cleanedUrl ? safeParseUrl(cleanedUrl) : null;
+
+    if (!name || !cleanedUrl || !parsedUrl) {
+      continue;
+    }
+
+    if (!parsedUrl.hostname.endsWith(".cdu.edu.cn") || parsedUrl.hostname === "www.cdu.edu.cn") {
+      continue;
+    }
+
+    if (!isLikelyInstitutionName(name)) {
+      continue;
+    }
+
+    results.push({
+      name,
+      url: cleanedUrl
+    });
+  }
+
+  return dedupeByNameAndUrl(results);
 }
 
 function toCatalogSite(
@@ -591,12 +920,16 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
   private readonly apiKey?: string;
   private readonly baseUrl: string;
   private readonly cacheTtlMs: number;
+  private readonly maxDiscoveryDepth: number;
+  private readonly maxDiscoveryPages: number;
   private readonly cache = new Map<string, { expiresAt: number; value: unknown }>();
 
   constructor(options: FirecrawlApiAdapterOptions) {
     this.apiKey = options.apiKey;
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.cacheTtlMs = options.cacheTtlMs ?? 30 * 60 * 1000;
+    this.maxDiscoveryDepth = Math.max(0, options.maxDiscoveryDepth ?? 2);
+    this.maxDiscoveryPages = Math.max(1, options.maxDiscoveryPages ?? 8);
   }
 
   async getOrgStructure(): Promise<OrganizationStructure> {
@@ -703,10 +1036,30 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
         toCatalogSite(item, "department")
       );
 
+      let supplementalOrgSites: CatalogSite[] = [];
+      try {
+        const html = await this.fetchPageHtml(ORG_URL);
+        supplementalOrgSites = parseSupplementalOrgLinksFromHtml(html).map((item) =>
+          toCatalogSite(
+            {
+              name: item.name,
+              category: "组织机构",
+              website_url: item.url,
+              source_url: ORG_URL,
+              last_synced_at: nowIso()
+            },
+            "organization",
+            "组织机构"
+          )
+        );
+      } catch {
+        supplementalOrgSites = [];
+      }
+
       return {
         fetched_at: nowIso(),
         sites: dedupeCatalogSites(
-          [...orgSites, ...departmentSites].filter(
+          [...orgSites, ...supplementalOrgSites, ...departmentSites].filter(
             (item) =>
               item.website_url !== item.source_url &&
               item.website_url !== ORG_URL &&
@@ -723,7 +1076,7 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
     const matches = catalog.sites
       .map((item) => ({
         item,
-        score: scoreSiteMatch(item.name, keyword)
+        score: scoreCatalogSiteMatch(item, keyword)
       }))
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -766,12 +1119,13 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
                 }
                 const name = asNonEmptyString((item as JsonObject).name);
                 const url = asNonEmptyString((item as JsonObject).url);
-                if (!name || !url) {
+                const cleanedUrl = url ? cleanWebsiteUrl(url, target.website_url) : null;
+                if (!name || !cleanedUrl) {
                   return null;
                 }
                 return {
                   name,
-                  url: resolveUrl(url, target.website_url)
+                  url: cleanedUrl
                 };
               })
               .filter((item): item is LinkItem => item !== null)
@@ -811,15 +1165,46 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
       }
 
       const home = await this.getSiteContent(target.name);
-      const candidateUrls = this.selectCandidateUrls(question, target.website_url, home.important_links);
+      const focusTerms = extractQuestionFocusTerms(question, target.name);
+      const candidateUrls = this.selectCandidateUrls(
+        question,
+        target.website_url,
+        home.important_links,
+        focusTerms
+      );
       const analysisSteps = [
         `收到问题：${question}`,
         `已定位站点：${target.name} (${target.website_url})`,
-        `准备检查这些页面：${candidateUrls.join("，")}`
+        `准备递归检查这些页面（最大深度 ${this.maxDiscoveryDepth}，最多 ${this.maxDiscoveryPages} 页）：${candidateUrls.join("，")}`
       ];
 
-      for (const url of candidateUrls) {
-        const result = await this.answerFromPage(url, question, target);
+      const visitedUrls: string[] = [];
+      const visitedSet = new Set<string>();
+      const queue = candidateUrls.map((url, index) => ({
+        url,
+        depth: index === 0 ? 0 : 1,
+        score:
+          index === 0
+            ? /(在哪|地址|位置|电话|邮箱|联系|办公室)/.test(question)
+              ? 100
+              : 50
+            : scoreQuestionLink(
+                question,
+                home.important_links.find((item) => item.url === url)?.name ?? "",
+                url
+              )
+      }));
+
+      while (queue.length > 0 && visitedUrls.length < this.maxDiscoveryPages) {
+        queue.sort((a, b) => b.score - a.score);
+        const current = queue.shift();
+        if (!current || visitedSet.has(current.url)) {
+          continue;
+        }
+
+        visitedSet.add(current.url);
+        visitedUrls.push(current.url);
+        const result = await this.answerFromPage(current.url, question, target, focusTerms);
         analysisSteps.push(result.analysisStep);
         if (result.answered) {
           return {
@@ -833,6 +1218,24 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
             fetched_at: nowIso()
           };
         }
+
+        if (current.depth >= this.maxDiscoveryDepth) {
+          continue;
+        }
+
+        for (const link of result.discoveredLinks) {
+          if (visitedSet.has(link.url) || queue.some((item) => item.url === link.url)) {
+            continue;
+          }
+
+          queue.push({
+            url: link.url,
+            depth: current.depth + 1,
+            score:
+              scoreQuestionLink(question, link.name, link.url) +
+              (focusTerms.some((term) => link.name.includes(term) || link.url.includes(term)) ? 80 : 0)
+          });
+        }
       }
 
       return {
@@ -842,10 +1245,10 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
         evidence: home.markdown_excerpt || home.summary,
         analysis_steps: [
           ...analysisSteps,
-          "综合以上页面内容判断，当前没有出现可以直接回答该问题的明确信息，所以返回“没有”。"
+          `综合已检查的 ${visitedUrls.length} 个页面内容判断，当前没有出现可以直接回答该问题的明确信息，所以返回“没有”。`
         ],
         matched_site: target,
-        source_urls: candidateUrls,
+        source_urls: visitedUrls,
         fetched_at: nowIso()
       };
     });
@@ -893,20 +1296,20 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
   private selectCandidateUrls(
     question: string,
     siteUrl: string,
-    links: LinkItem[]
+    links: LinkItem[],
+    focusTerms: string[]
   ): string[] {
     const urlMap = new Map<string, number>();
     const isContactQuestion = /(在哪|地址|位置|电话|邮箱|联系|办公室)/.test(question);
-    urlMap.set(siteUrl, isContactQuestion ? 100 : 50);
+    urlMap.set(siteUrl, isContactQuestion ? (focusTerms.length > 0 ? 35 : 100) : 50);
 
     for (const link of links) {
-      let score = 10;
-      if (isContactQuestion && /(联系|关于|简介|概况|办公室|部门简介|中心简介)/.test(link.name)) {
-        score += 40;
+      if (!isSameSiteUrl(link.url, siteUrl) || !isHtmlLikeUrl(link.url)) {
+        continue;
       }
-      if (question.includes(link.name)) {
-        score += 30;
-      }
+      const score =
+        scoreQuestionLink(question, link.name, link.url) +
+        (focusTerms.some((term) => link.name.includes(term) || link.url.includes(term)) ? 80 : 0);
       if (!urlMap.has(link.url) || (urlMap.get(link.url) ?? 0) < score) {
         urlMap.set(link.url, score);
       }
@@ -921,7 +1324,8 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
   private async answerFromPage(
     url: string,
     question: string,
-    matchedSite: CatalogSite
+    matchedSite: CatalogSite,
+    focusTerms: string[]
   ): Promise<PageAnswerResult> {
     const response = await this.scrape(url, [
       {
@@ -944,16 +1348,29 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
     const pageSummary = summarizeForAnalysis(response.data?.markdown ?? "");
     const heuristicAnswer = extractHeuristicAnswer(
       question,
-      response.data?.markdown ?? ""
+      response.data?.markdown ?? "",
+      focusTerms
+    );
+    const discoveredLinks = markdownLinksToNamedItems(
+      response.data?.markdown ?? "",
+      url
+    )
+      .filter((link) => isSameSiteUrl(link.url, matchedSite.website_url) && isHtmlLikeUrl(link.url))
+      .slice(0, 20);
+    const focusMatched = pageMatchesFocusTerms(
+      response.data?.markdown ?? "",
+      title,
+      focusTerms
     );
 
-    if (heuristicAnswer) {
+    if (heuristicAnswer && focusMatched) {
       return {
         answered: true,
         answer: heuristicAnswer,
         evidence: `从页面正文中提取到与问题直接相关的信息：${heuristicAnswer}`,
         analysisStep: `已检查页面《${title}》(${url})，并通过页面正文中的地址/联系方式字段提取到直接答案。`,
-        sourceUrl: url
+        sourceUrl: url,
+        discoveredLinks
       };
     }
 
@@ -962,10 +1379,13 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
       answer: answer ?? "当前页面没有明确答案。",
       evidence,
       analysisStep:
-        answered && !!answer
+        heuristicAnswer && !focusMatched
+          ? `已检查页面《${title}》(${url})，发现了站点级通用联系方式，但未命中问题中的具体科室/部门信息，继续向下检查更细页面。`
+          : answered && !!answer
           ? `已检查页面《${title}》(${url})，页面中存在可直接回答问题的内容。`
           : `已检查页面《${title}》(${url})，没有发现明确答案。页面摘要：${pageSummary}`,
-      sourceUrl: url
+      sourceUrl: url,
+      discoveredLinks
     };
   }
 
