@@ -628,11 +628,19 @@ function extractQuestionFocusTerms(question: string, matchedSiteName: string): s
     .filter(Boolean);
 
   if (matches.length > 0) {
-    return [...new Set(matches)];
+    const uniqueMatches = [...new Set(matches)];
+    const hasSiteEquivalentFocus = uniqueMatches.every((term) =>
+      aliases.some((alias) => scoreSiteMatch(alias, term) >= 45 || scoreSiteMatch(term, alias) >= 45)
+    );
+
+    return hasSiteEquivalentFocus ? [] : uniqueMatches;
   }
 
   if (cleaned && cleaned.length >= 2 && cleaned.length <= 12) {
-    return [cleaned];
+    const isEquivalentToSite = aliases.some(
+      (alias) => scoreSiteMatch(alias, cleaned) >= 45 || scoreSiteMatch(cleaned, alias) >= 45
+    );
+    return isEquivalentToSite ? [] : [cleaned];
   }
 
   return [];
