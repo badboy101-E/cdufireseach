@@ -1,15 +1,27 @@
 import express, { type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { FirecrawlApiAdapter } from "./firecrawl/apiAdapter.js";
 import type { FirecrawlAdapter } from "./firecrawl/adapter.js";
+import { ArkChatClient } from "./llm/arkChatClient.js";
+import { registerAskRoute } from "./routes/askRoute.js";
+import { CduQaService } from "./services/cduQaService.js";
+import { MemoryCurationService } from "./services/memoryCurationService.js";
 import { registerTools } from "./tools.js";
 
 const SERVER_NAME = "cdufireseach";
 const SERVER_VERSION = "0.1.0";
+const localEnvPath = resolve(process.cwd(), ".env");
+
+if (typeof process.loadEnvFile === "function" && existsSync(localEnvPath)) {
+  process.loadEnvFile(localEnvPath);
+}
+
 const transportMode = process.env.MCP_TRANSPORT?.trim().toLowerCase() ?? "http";
 const host = process.env.MCP_HOST ?? "0.0.0.0";
 const port = Number.parseInt(process.env.MCP_PORT ?? "3100", 10);
@@ -27,10 +39,38 @@ const firecrawlMaxDiscoveryPages = Number.parseInt(
   process.env.FIRECRAWL_MAX_DISCOVERY_PAGES ?? "8",
   10
 );
+const memoryFilePath =
+  process.env.CDU_MEMORY_FILE_PATH ??
+  resolve(process.cwd(), "../cdufireseach-memory.md");
+const memoryCandidateFilePath =
+  process.env.CDU_MEMORY_CANDIDATE_FILE_PATH ??
+  resolve(process.cwd(), "../cdufireseach-memory-candidates.md");
+const memoryCacheTtlMs = Number.parseInt(
+  process.env.CDU_MEMORY_CACHE_TTL_MS ?? "300000",
+  10
+);
+const memoryEnabled =
+  (process.env.CDU_MEMORY_ENABLED ?? "false").trim().toLowerCase() === "true";
+const memoryAutoWriteEnabled =
+  memoryEnabled &&
+  (process.env.CDU_MEMORY_AUTO_WRITE_ENABLED ?? "false").trim().toLowerCase() === "true";
+const llmBaseUrl =
+  process.env.CDU_LLM_BASE_URL ?? process.env.ARK_BASE_URL ?? "";
+const llmApiKey =
+  process.env.CDU_LLM_API_KEY ?? process.env.ARK_API_KEY ?? "";
+const llmModel =
+  process.env.CDU_LLM_MODEL ?? process.env.ARK_MODEL ?? "";
+const llmTemperature = Number.parseFloat(
+  process.env.CDU_LLM_TEMPERATURE ?? "0.2"
+);
+const llmTimeoutMs = Number.parseInt(
+  process.env.CDU_LLM_TIMEOUT_MS ?? "20000",
+  10
+);
 
 function createAdapter(): FirecrawlAdapter {
   console.log(
-    `[cdufireseach] firecrawl-only mode; api: ${firecrawlApiUrl}; max-depth: ${firecrawlMaxDiscoveryDepth}; max-pages: ${firecrawlMaxDiscoveryPages}`
+    `[cdufireseach] firecrawl mode; api: ${firecrawlApiUrl}; max-depth: ${firecrawlMaxDiscoveryDepth}; max-pages: ${firecrawlMaxDiscoveryPages}; memory-enabled: ${memoryEnabled}`
   );
 
   return new FirecrawlApiAdapter({
@@ -42,11 +82,45 @@ function createAdapter(): FirecrawlAdapter {
       : undefined,
     maxDiscoveryPages: Number.isFinite(firecrawlMaxDiscoveryPages)
       ? firecrawlMaxDiscoveryPages
+      : undefined,
+    memoryFilePath: memoryEnabled ? memoryFilePath : undefined,
+    memoryCacheTtlMs: Number.isFinite(memoryCacheTtlMs)
+      ? memoryCacheTtlMs
       : undefined
   });
 }
 
 const adapter = createAdapter();
+
+function createLlmClient(): ArkChatClient | undefined {
+  if (!llmBaseUrl.trim() || !llmApiKey.trim() || !llmModel.trim()) {
+    console.log("[cdufireseach] LLM runtime disabled; missing base URL, API key, or model");
+    return undefined;
+  }
+
+  console.log(
+    `[cdufireseach] LLM runtime enabled; base: ${llmBaseUrl}; model: ${llmModel}`
+  );
+
+  return new ArkChatClient({
+    baseUrl: llmBaseUrl,
+    apiKey: llmApiKey,
+    model: llmModel,
+    temperature: Number.isFinite(llmTemperature) ? llmTemperature : 0.2,
+    timeoutMs: Number.isFinite(llmTimeoutMs) ? llmTimeoutMs : 20_000
+  });
+}
+
+const llmClient = createLlmClient();
+const memoryCurationService =
+  llmClient && memoryAutoWriteEnabled
+    ? new MemoryCurationService(llmClient, {
+        formalFilePath: memoryFilePath,
+        candidateFilePath: memoryCandidateFilePath,
+        enabled: true
+      })
+    : undefined;
+const qaService = new CduQaService(adapter, llmClient, memoryCurationService);
 
 function createServer(): McpServer {
   const server = new McpServer(
@@ -61,7 +135,7 @@ function createServer(): McpServer {
     }
   );
 
-  registerTools(server, adapter);
+  registerTools(server, qaService);
   return server;
 }
 
@@ -76,6 +150,7 @@ async function startHttpServer(): Promise<void> {
   app.use(express.json());
 
   const transports: Record<string, StreamableHTTPServerTransport> = {};
+  registerAskRoute(app, qaService);
 
   app.get("/healthz", (_req, res) => {
     res.json({
@@ -86,7 +161,15 @@ async function startHttpServer(): Promise<void> {
       data_mode: "firecrawl",
       firecrawl_api_url: firecrawlApiUrl,
       firecrawl_max_discovery_depth: firecrawlMaxDiscoveryDepth,
-      firecrawl_max_discovery_pages: firecrawlMaxDiscoveryPages
+      firecrawl_max_discovery_pages: firecrawlMaxDiscoveryPages,
+      memory_enabled: memoryEnabled,
+      memory_file_path: memoryFilePath,
+      memory_candidate_file_path: memoryCandidateFilePath,
+      memory_auto_write_enabled: memoryAutoWriteEnabled,
+      qa_runtime: "langgraph",
+      llm_enabled: Boolean(llmClient),
+      llm_base_url: llmClient?.baseUrl ?? null,
+      llm_model: llmClient?.model ?? null
     });
   });
 

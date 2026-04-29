@@ -6,3 +6,8 @@
 cdufireseach/.env
 cdufireseach/node_modules
 cdufireseach/dist
+
+# Runtime memory/cache artifacts
+cdufireseach-memory.md
+cdufireseach-memory-candidates.md
+memory-backups/

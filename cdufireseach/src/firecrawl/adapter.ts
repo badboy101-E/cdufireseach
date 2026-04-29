@@ -9,6 +9,7 @@ import type {
   SiteContentResult,
   SiteSearchResult
 } from "../types.js";
+import type { MemoryMatchResult } from "../memory/markdownMemory.js";
 
 export interface FirecrawlAdapter {
   getOrgStructure(): Promise<OrganizationStructure>;
@@ -16,7 +17,14 @@ export interface FirecrawlAdapter {
   getSiteCatalog(): Promise<SiteCatalogResult>;
   findSite(keyword: string): Promise<SiteSearchResult>;
   getSiteContent(siteName: string): Promise<SiteContentResult>;
-  askSite(question: string, siteName?: string): Promise<SiteAnswerResult>;
+  getMemoryCandidates(question: string, siteName?: string): Promise<MemoryMatchResult[]>;
+  askSite(
+    question: string,
+    siteName?: string,
+    options?: {
+      skipMemory?: boolean;
+    }
+  ): Promise<SiteAnswerResult>;
   findDepartmentSite(keyword: string): Promise<DepartmentSiteSearchResult>;
   getDepartmentProfile(departmentName: string): Promise<DepartmentProfile>;
 }

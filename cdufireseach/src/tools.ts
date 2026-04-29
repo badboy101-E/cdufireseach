@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { FirecrawlAdapter } from "./firecrawl/adapter.js";
+import type { CduQaService } from "./services/cduQaService.js";
 
 function jsonContent<T extends Record<string, unknown>>(payload: T) {
   return {
@@ -16,7 +16,7 @@ function jsonContent<T extends Record<string, unknown>>(payload: T) {
 
 export function registerTools(
   server: McpServer,
-  adapter: FirecrawlAdapter
+  qaService: CduQaService
 ): void {
   server.registerTool(
     "ask_cdu",
@@ -32,6 +32,6 @@ export function registerTools(
           .describe("可选调试参数。已知站点名称时可传入，例如 信息网络中心。正常 Agent 流程通常不需要。")
       }
     },
-    async ({ question, siteName }) => jsonContent(await adapter.askSite(question, siteName))
+    async ({ question, siteName }) => jsonContent(await qaService.ask(question, siteName))
   );
 }
