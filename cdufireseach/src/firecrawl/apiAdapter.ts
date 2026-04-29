@@ -171,7 +171,17 @@ function cleanWebsiteUrl(rawUrl: string, baseUrl: string): string | null {
     return null;
   }
 
-  const resolved = resolveUrl(cleaned, baseUrl);
+  let resolved = resolveUrl(cleaned, baseUrl);
+
+  try {
+    const parsed = new URL(resolved);
+    if (/\/Line$/i.test(parsed.pathname)) {
+      parsed.pathname = parsed.pathname.replace(/\/Line$/i, "/");
+      resolved = parsed.toString();
+    }
+  } catch {
+    // Keep the original resolved value if URL parsing fails.
+  }
 
   if (resolved === `${DEPT_URL}#` || resolved === `${ORG_URL}#`) {
     return null;
@@ -467,9 +477,13 @@ function extractParentheticalLocationAnswer(markdown: string): string | null {
 }
 
 function extractPhoneAnswer(markdown: string): string | null {
-  const normalized = markdown.replace(/[（(]\s*(0\d{2,3})\s*[）)]\s*(\d{7,8})/g, "$1-$2");
+  const normalized = normalizePhoneText(markdown);
   const phones = [...normalized.matchAll(/0\d{2,3}-\d{7,8}/g)].map((match) => match[0]);
   return phones.length > 0 ? phones.join("，") : null;
+}
+
+function normalizePhoneText(value: string): string {
+  return value.replace(/[（(]\s*(0\d{2,3})\s*[）)]\s*(\d{7,8})/g, "$1-$2");
 }
 
 function extractEmailAnswer(markdown: string): string | null {
@@ -498,6 +512,7 @@ function cleanAnswerText(value: string): string {
     .replace(/版权所有[:：]?\s*.+$/u, "")
     .replace(/\s+/g, " ")
     .trim()
+    .replace(/^[：:，,。；;\s]+/u, "")
     .replace(/[，,。；;]+$/u, "");
 }
 
@@ -532,6 +547,107 @@ function questionRequestsStaffTable(question: string): boolean {
     /(清单|列表|列一?个|各个|各科室|所有|全部)/.test(question) &&
     /(科室|部门|人员|工作人员|办公地点|电话|联系方式)/.test(question)
   );
+}
+
+function questionRequestsContactList(question: string): boolean {
+  return (
+    /(清单|列表|列一?个|各个|各科室|所有|全部|分别|对应|有哪些)/.test(question) &&
+    /(电话|联系电话|联系方式|办公电话)/.test(question)
+  );
+}
+
+function normalizeContactDepartmentName(value: string): string {
+  return cleanAnswerText(value)
+    .replace(/^(科室|部门|名称|联系电话|办公电话|电话|联系方式)[：:]?/u, "")
+    .replace(/[：:：\-–—]+$/u, "")
+    .trim();
+}
+
+function isLikelyDepartmentContactName(value: string): boolean {
+  if (!value || value.length > 24) {
+    return false;
+  }
+
+  if (/(处长|副处长|书记|领导|校长|主任委员)/.test(value)) {
+    return false;
+  }
+
+  return /(科|室|办公室|中心|大厅|部|处)$/.test(value);
+}
+
+function extractContactListAnswer(question: string, markdown: string): string | null {
+  if (!questionRequestsContactList(question)) {
+    return null;
+  }
+
+  const rows = markdown
+    .split("\n")
+    .map(parseMarkdownTableRow)
+    .filter((row): row is string[] => !!row && !isMarkdownTableSeparator(row));
+  const tableContacts: Array<{ department: string; phone: string }> = [];
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const header = rows[index] ?? [];
+    const joined = header.join("");
+    if (!/(科室|部门|名称)/.test(joined) || !/(电话|联系方式)/.test(joined)) {
+      continue;
+    }
+
+    const departmentIndex = header.findIndex((cell) => /(科室|部门|名称)/.test(cell));
+    const phoneIndex = header.findIndex((cell) => /(办公电话|联系电话|电话|联系方式)/.test(cell));
+    if (departmentIndex < 0 || phoneIndex < 0) {
+      continue;
+    }
+
+    for (const row of rows.slice(index + 1)) {
+      const department = normalizeContactDepartmentName(row[departmentIndex] ?? "");
+      const phone = extractPhoneAnswer(row[phoneIndex] ?? "");
+      if (!department || !phone || !isLikelyDepartmentContactName(department)) {
+        continue;
+      }
+      tableContacts.push({ department, phone });
+    }
+  }
+
+  const lineContacts = normalizeMarkdownLines(markdown).flatMap((line) => {
+    const normalized = normalizePhoneText(line);
+    const phone = extractPhoneAnswer(normalized);
+    if (!phone) {
+      return [];
+    }
+
+    const firstPhoneIndex = normalized.search(/0\d{2,3}-\d{7,8}/);
+    if (firstPhoneIndex < 0) {
+      return [];
+    }
+
+    const department = normalizeContactDepartmentName(
+      normalized
+        .slice(0, firstPhoneIndex)
+        .replace(/联系电话|办公电话|电话|联系方式/gu, "")
+        .replace(/[（(]$/u, "")
+    );
+
+    return isLikelyDepartmentContactName(department) ? [{ department, phone }] : [];
+  });
+
+  const contacts = [...tableContacts, ...lineContacts];
+  const deduped = new Map<string, string>();
+  for (const item of contacts) {
+    if (!deduped.has(item.department)) {
+      deduped.set(item.department, item.phone);
+    }
+  }
+
+  if (deduped.size < 2) {
+    return null;
+  }
+
+  return [
+    "| 科室 | 联系电话 |",
+    "| --- | --- |",
+    ...[...deduped.entries()].map(([department, phone]) => `| ${department} | ${phone} |`)
+  ].join("\n");
 }
 
 function extractStaffTableAnswer(question: string, markdown: string): string | null {
@@ -683,7 +799,7 @@ function extractFocusedLineAnswer(
 
   for (const index of orderedIndexes) {
     const line = lines[index] ?? "";
-    const snippet = [line, lines[index + 1] ?? ""].filter(Boolean).join("\n");
+    const snippet = lines.slice(index, index + 4).filter(Boolean).join("\n");
 
     if (intent === "location") {
       const answer =
@@ -751,12 +867,212 @@ function extractNavigationAnswer(question: string, markdown: string): string | n
     "实验室建设",
     "党群工作",
     "对外交流",
-    "规章制度"
+    "规章制度",
+    "部门动态",
+    "中心概况",
+    "信息网络服务",
+    "网络安全",
+    "网络安全周专题网站",
+    "下载中心",
+    "党风廉政建设"
   ];
   const matched = knownTopLevel.filter((item) => ordered.includes(item));
   const result = (matched.length >= 3 ? matched : ordered.slice(0, 14)).filter(Boolean);
 
   return result.length >= 3 ? `首页主要栏目包括：${result.join("、")}` : null;
+}
+
+function extractLinkNameAndUrl(line: string): { name: string; url: string } | null {
+  const match = line.match(/\[([^\]]+)\]\(([^)]+)\)/u);
+  const name = match?.[1]?.trim();
+  const url = match?.[2]?.trim();
+  return name && url ? { name, url } : null;
+}
+
+function extractFocusedNavigationAnswer(
+  question: string,
+  markdown: string,
+  focusTerms: string[]
+): string | null {
+  if (/(电话|联系电话|联系方式|办公地点|地址|位置|工作人员|人员)/.test(question)) {
+    return null;
+  }
+
+  if (!/(栏目|菜单|导航|有哪些内容|有哪些|下设|包括)/.test(question) || focusTerms.length === 0) {
+    return null;
+  }
+
+  const lines = markdown.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const link = extractLinkNameAndUrl(line);
+    if (!link || !focusTerms.some((term) => link.name.includes(term) || term.includes(link.name))) {
+      continue;
+    }
+
+    const currentIndent = line.match(/^\s*/)?.[0].length ?? 0;
+    const children: string[] = [];
+    for (const childLine of lines.slice(index + 1)) {
+      if (!childLine.trim()) {
+        continue;
+      }
+
+      const childIndent = childLine.match(/^\s*/)?.[0].length ?? 0;
+      const childLink = extractLinkNameAndUrl(childLine);
+      if (!childLink) {
+        continue;
+      }
+
+      if (childIndent <= currentIndent) {
+        break;
+      }
+
+      if (!/(更多|查看|返回|首页|主站|学校官网)/.test(childLink.name)) {
+        children.push(childLink.name);
+      }
+    }
+
+    const uniqueChildren = [...new Set(children)].slice(0, 12);
+    if (uniqueChildren.length >= 2) {
+      return `${link.name}栏目包括：${uniqueChildren.join("、")}`;
+    }
+  }
+
+  return null;
+}
+
+function extractSectionListAnswer(
+  question: string,
+  markdown: string,
+  focusTerms: string[]
+): string | null {
+  if (/(电话|联系电话|联系方式|办公地点|地址|位置|工作人员|人员)/.test(question)) {
+    return null;
+  }
+
+  if (!/(有哪些|内容|列表|清单|包括)/.test(question)) {
+    return null;
+  }
+
+  const explicitTerms = [...question.matchAll(/(用户指南|常见故障|通知公告|部门动态|最新动态|快速通道|服务指南)/g)]
+    .map((match) => match[1] ?? "")
+    .filter(Boolean);
+  const sectionTerms = [
+    ...focusTerms.map((term) => term.replace(/(有哪些|内容|列表|清单|包括)$/g, "")),
+    ...explicitTerms
+  ].filter((term) => term.length >= 2);
+  const uniqueTerms = [...new Set(sectionTerms)];
+  if (uniqueTerms.length === 0) {
+    return null;
+  }
+
+  const lines = markdown.split("\n");
+  const sectionBreakPattern = /^(通知公告|部门动态|最新动态|用户指南|常见故障|快速通道|服务指南|首页|中心概况|机构设置|规章制度|网络安全)$/;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const text = cleanMarkdownTableCell(lines[index] ?? "")
+      .replace(/^[*#\s]+/g, "")
+      .trim();
+    const matchedTerm = uniqueTerms.find((term) => text === term || text.includes(term));
+    if (!matchedTerm) {
+      continue;
+    }
+
+    const items: string[] = [];
+    for (const line of lines.slice(index + 1)) {
+      const cleanedLine = cleanMarkdownTableCell(line).replace(/^[*#\s]+/g, "").trim();
+      if (items.length > 0 && sectionBreakPattern.test(cleanedLine)) {
+        break;
+      }
+
+      const link = extractLinkNameAndUrl(line);
+      if (!link || /更多|查看|首页|主站|返回|Chrome|Firefox|Safari|Edge/i.test(link.name)) {
+        continue;
+      }
+      if (/!\[|图片|logo|banner/i.test(link.name)) {
+        continue;
+      }
+      items.push(link.name);
+      if (items.length >= 10) {
+        break;
+      }
+    }
+
+    const uniqueItems = [...new Set(items)];
+    if (uniqueItems.length >= 2) {
+      return `${matchedTerm}包括：${uniqueItems.join("、")}`;
+    }
+  }
+
+  return null;
+}
+
+function extractFocusedLinkAnswer(
+  question: string,
+  markdown: string,
+  baseUrl: string,
+  focusTerms: string[]
+): string | null {
+  if (!/(入口|链接|网址|查看|介绍|页面)/.test(question) || focusTerms.length === 0) {
+    return null;
+  }
+
+  for (const item of markdownLinksToNamedItems(markdown, baseUrl)) {
+    if (!focusTerms.some((term) => item.name.includes(term) || term.includes(item.name))) {
+      continue;
+    }
+    if (/^(javascript:|mailto:)/i.test(item.url)) {
+      continue;
+    }
+    if (/!\[|图片|logo|banner/i.test(item.name) || /\.(?:jpg|jpeg|png|gif|svg|webp)(?:[?#].*)?$/i.test(item.url)) {
+      continue;
+    }
+    return `可以在“${item.name}”页面查看：${item.url}`;
+  }
+
+  return null;
+}
+
+function extractVpnLinkAnswer(question: string, markdown: string, baseUrl: string): string | null {
+  if (!/vpn/i.test(question)) {
+    return null;
+  }
+
+  const link = markdownLinksToNamedItems(markdown, baseUrl)
+    .filter((item) => /vpn/i.test(`${item.name} ${item.url}`) && isHtmlLikeUrl(item.url))
+    .map((item) => {
+      let score = 10;
+      if (/VPN服务|校园VPN系统使用手册/i.test(item.name)) {
+        score += 100;
+      }
+      if (/vpn\.cdu\.edu\.cn/i.test(item.url)) {
+        score += 90;
+      }
+      if (/VPN常见问题/i.test(item.name)) {
+        score += 60;
+      }
+      if (/堡垒机|运维/i.test(item.name)) {
+        score -= 50;
+      }
+      return { item, score };
+    })
+    .sort((a, b) => b.score - a.score)[0]?.item;
+
+  return link ? `可以在“${link.name}”入口找到：${link.url}` : null;
+}
+
+function extractUserGuideAnswer(question: string, markdown: string, baseUrl: string): string | null {
+  if (!/用户指南/.test(question)) {
+    return null;
+  }
+
+  const links = markdownLinksToNamedItems(markdown, baseUrl)
+    .filter((item) => /\/info\/1035\//.test(item.url))
+    .map((item) => item.name)
+    .filter((name) => !/更多|查看/.test(name));
+  const uniqueLinks = [...new Set(links)].slice(0, 10);
+
+  return uniqueLinks.length >= 2 ? `用户指南包括：${uniqueLinks.join("、")}` : null;
 }
 
 function normalizeMarkdownLines(markdown: string): string[] {
@@ -897,8 +1213,39 @@ function extractFocusedAnswer(
 function extractHeuristicAnswer(
   question: string,
   markdown: string,
+  baseUrl: string,
   focusTerms: string[]
 ): string | null {
+  const contactListAnswer = extractContactListAnswer(question, markdown);
+  if (contactListAnswer) {
+    return contactListAnswer;
+  }
+
+  const focusedNavigationAnswer = extractFocusedNavigationAnswer(question, markdown, focusTerms);
+  if (focusedNavigationAnswer) {
+    return focusedNavigationAnswer;
+  }
+
+  const sectionListAnswer = extractSectionListAnswer(question, markdown, focusTerms);
+  if (sectionListAnswer) {
+    return sectionListAnswer;
+  }
+
+  const userGuideAnswer = extractUserGuideAnswer(question, markdown, baseUrl);
+  if (userGuideAnswer) {
+    return userGuideAnswer;
+  }
+
+  const focusedLinkAnswer = extractFocusedLinkAnswer(question, markdown, baseUrl, focusTerms);
+  if (focusedLinkAnswer) {
+    return focusedLinkAnswer;
+  }
+
+  const vpnLinkAnswer = extractVpnLinkAnswer(question, markdown, baseUrl);
+  if (vpnLinkAnswer) {
+    return vpnLinkAnswer;
+  }
+
   const navigationAnswer = extractNavigationAnswer(question, markdown);
   if (navigationAnswer) {
     return navigationAnswer;
@@ -1003,8 +1350,12 @@ function scoreQuestionLink(question: string, linkName: string, url: string): num
   let score = 10;
   const isContactQuestion = /(在哪|地址|位置|电话|邮箱|联系|办公室)/.test(question);
 
-  if (isContactQuestion && /(联系|关于|简介|概况|办公室|部门简介|中心简介|机构设置|联系我们)/.test(linkName)) {
+  if (isContactQuestion && /(联系|关于|简介|概况|办公室|部门简介|中心简介|机构设置|科室人员|岗位职责|人员|联系我们)/.test(linkName)) {
     score += 40;
+  }
+
+  if (isContactQuestion && /(科室人员|岗位职责|jgsz|ksry|gwzz)/i.test(`${linkName} ${url}`)) {
+    score += 55;
   }
 
   if (question.includes(linkName)) {
@@ -1024,6 +1375,16 @@ function scoreQuestionLink(question: string, linkName: string, url: string): num
 
 function extractQuestionFocusTerms(question: string, matchedSiteName: string): string[] {
   let remainder = normalizeSearchText(question);
+  const normalizedSiteName = matchedSiteName.replace(/（/g, "(").replace(/）/g, ")");
+  const parentheticalFocusTerms = [...normalizedSiteName.matchAll(/\(([^)]+)\)/g)]
+    .flatMap((match) => (match[1] ?? "").split(/[、,，/]/))
+    .map((item) => item.trim())
+    .filter((item) => item && question.includes(item) && /(科|室|中心|办公室|部门)$/.test(item));
+
+  if (parentheticalFocusTerms.length > 0) {
+    return [...new Set(parentheticalFocusTerms)];
+  }
+
   const aliases = expandSearchNames(matchedSiteName)
     .map((item) => normalizeSearchText(item))
     .filter(Boolean)
@@ -1034,10 +1395,11 @@ function extractQuestionFocusTerms(question: string, matchedSiteName: string): s
   }
 
   const cleaned = remainder
+    .replace(/工资福利科/g, "劳资科")
     .replace(/(请问|麻烦|帮我|一下|告诉我|查询|查一下|列一个|清单|列表)/g, " ")
     .replace(/(在哪里|在哪|哪里|地址|位置|办公地点|办公地址|办公位置|地点)/g, " ")
     .replace(/(电话|联系电话|联系方式|号码|邮箱|电子邮箱|email)/gi, " ")
-    .replace(/(是多少|是什么|有哪些|有哪个|各个|所有|全部|对应|相关|信息|主要栏目|栏目|菜单|导航|首页|主页|网站)/g, " ")
+    .replace(/(是多少|是什么|有哪些|哪些|有哪个|各个|所有|全部|对应|相关|主要栏目|栏目|菜单|导航|首页|主页|网站|专业介绍|介绍|查看|页面|入口|链接|网址)/g, " ")
     .replace(/[的呢吗呀啊]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -1071,6 +1433,23 @@ function pageMatchesFocusTerms(markdown: string, title: string, focusTerms: stri
 
   const haystack = `${title}\n${markdown}`;
   return focusTerms.some((term) => haystack.includes(term));
+}
+
+function answerMatchesFocusTerms(answer: string, focusTerms: string[]): boolean {
+  if (focusTerms.length === 0) {
+    return true;
+  }
+
+  return focusTerms.some((term) => {
+    if (answer.includes(term)) {
+      return true;
+    }
+    if (/vpn/i.test(term) && /vpn/i.test(answer)) {
+      return true;
+    }
+    const compact = term.replace(/(专业介绍|专业|介绍|查看|页面|入口|链接|网址|内容)$/g, "").trim();
+    return compact.length >= 2 && answer.includes(compact);
+  });
 }
 
 function dedupeCatalogSites(items: CatalogSite[]): CatalogSite[] {
@@ -1460,7 +1839,7 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
       const summary =
         asNonEmptyString(payload?.summary) ??
         extractSummaryFromMarkdown(response.data?.markdown ?? "");
-      const importantLinks =
+      const payloadImportantLinks =
         Array.isArray(payload?.important_links)
           ? (payload.important_links as unknown[])
               .map((item) => {
@@ -1479,14 +1858,24 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
                 };
               })
               .filter((item): item is LinkItem => item !== null)
-          : markdownLinksToNamedItems(response.data?.markdown ?? "", target.website_url).slice(0, 8);
+          : [];
+      const markdownImportantLinks = markdownLinksToNamedItems(
+        response.data?.markdown ?? "",
+        target.website_url
+      )
+        .filter((link) => isSameSiteUrl(link.url, target.website_url) && isHtmlLikeUrl(link.url))
+        .slice(0, 30);
+      const importantLinks =
+        payloadImportantLinks.length > 0
+          ? [...payloadImportantLinks, ...markdownImportantLinks]
+          : markdownImportantLinks;
 
       return {
         site_name: target.name,
         website_url: target.website_url,
         title,
         summary,
-        important_links: dedupeByNameAndUrl(importantLinks).slice(0, 8),
+        important_links: dedupeByNameAndUrl(importantLinks).slice(0, 20),
         markdown_excerpt: markdownExcerpt(response.data?.markdown ?? ""),
         source_url: target.website_url,
         fetched_at: nowIso()
@@ -1511,6 +1900,31 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
     }
   ): Promise<SiteAnswerResult> {
     return this.withCache(`site-answer:${siteName ?? ""}:${question}`, async () => {
+      if (/(成都大学|学校).*(有哪些|哪些).*(二级学院|院系)|有哪些(二级学院|院系)/.test(question)) {
+        const departments = await this.getDepartments();
+        const names = departments.departments
+          .filter((item) => item.category === "学院")
+          .map((item) => item.name);
+
+        return {
+          question,
+          answered: names.length > 0,
+          answer:
+            names.length > 0
+              ? `成都大学二级学院包括：${names.join("、")}`
+              : "未能从院系设置目录中提取到二级学院列表。",
+          evidence: `来源：${DEPT_URL}`,
+          analysis_steps: [
+            `收到问题：${question}`,
+            "问题询问学校二级学院/院系列表，直接读取成都大学院系设置目录。",
+            `从目录中提取到 ${names.length} 个学院条目。`
+          ],
+          matched_site: null,
+          source_urls: [DEPT_URL],
+          fetched_at: nowIso()
+        };
+      }
+
       const target = siteName ? await this.resolveSite(siteName) : await this.inferSiteFromQuestion(question);
       const memoryMatch = options?.skipMemory ? null : await this.findAnswerInMemory(question);
       if (memoryMatch && (!target || memoryMatchBelongsToSite(memoryMatch.entryTitle, target))) {
@@ -1698,22 +2112,26 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
       question,
       response.data?.markdown ?? ""
     );
+    const focusMatched = pageMatchesFocusTerms(
+      response.data?.markdown ?? "",
+      title,
+      focusTerms
+    );
     const heuristicAnswer = extractHeuristicAnswer(
       question,
       response.data?.markdown ?? "",
+      url,
       focusTerms
     );
+    const heuristicFocusMatched = heuristicAnswer
+      ? focusMatched || answerMatchesFocusTerms(heuristicAnswer, focusTerms)
+      : false;
     const discoveredLinks = markdownLinksToNamedItems(
       response.data?.markdown ?? "",
       url
     )
       .filter((link) => isSameSiteUrl(link.url, matchedSite.website_url) && isHtmlLikeUrl(link.url))
       .slice(0, 20);
-    const focusMatched = pageMatchesFocusTerms(
-      response.data?.markdown ?? "",
-      title,
-      focusTerms
-    );
 
     if (staffTableAnswer) {
       return {
@@ -1735,7 +2153,7 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
       };
     }
 
-    if (heuristicAnswer && focusMatched) {
+    if (heuristicAnswer && heuristicFocusMatched) {
       return {
         answered: true,
         answer: heuristicAnswer,
@@ -1744,7 +2162,7 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
           answer: heuristicAnswer,
           title,
           url,
-          focusMatched,
+          focusMatched: heuristicFocusMatched,
           focusTerms,
           kind: "heuristic"
         }),
@@ -1755,11 +2173,16 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
       };
     }
 
+    const jsonAnswerUsable =
+      answered &&
+      !!answer &&
+      (focusTerms.length === 0 || focusMatched || answerMatchesFocusTerms(answer, focusTerms));
+
     return {
-      answered: answered && !!answer,
+      answered: jsonAnswerUsable,
       answer: answer ?? "当前页面没有明确答案。",
       answerScore:
-        answered && answer
+        jsonAnswerUsable && answer
           ? scoreExtractedAnswer({
               question,
               answer,

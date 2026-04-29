@@ -263,18 +263,28 @@ export async function runCduQaGraph(
         };
       }
 
-      const raw = await fetchTool.invoke({ siteName: state.resolvedSiteName });
-      const parsed = JSON.parse(raw) as {
-        summary?: string;
-        title?: string;
-      };
+      try {
+        const raw = await fetchTool.invoke({ siteName: state.resolvedSiteName });
+        const parsed = JSON.parse(raw) as {
+          summary?: string;
+          title?: string;
+        };
 
-      return {
-        siteSummary: parsed.summary,
-        workflowSteps: [
-          `LangGraph: 已抓取站点首页上下文${parsed.title ? `（${parsed.title}）` : ""}`
-        ]
-      };
+        return {
+          siteSummary: parsed.summary,
+          workflowSteps: [
+            `LangGraph: 已抓取站点首页上下文${parsed.title ? `（${parsed.title}）` : ""}`
+          ]
+        };
+      } catch (error) {
+        return {
+          workflowSteps: [
+            `LangGraph: 站点首页上下文抓取失败，继续交由主问答流程处理${
+              error instanceof Error ? `（${error.message}）` : ""
+            }`
+          ]
+        };
+      }
     })
     .addNode("decideMemory", async (state) => {
       if (!llmClient) {
