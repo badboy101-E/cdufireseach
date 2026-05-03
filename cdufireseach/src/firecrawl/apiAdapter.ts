@@ -486,6 +486,16 @@ function normalizePhoneText(value: string): string {
   return value.replace(/[（(]\s*(0\d{2,3})\s*[）)]\s*(\d{7,8})/g, "$1-$2");
 }
 
+function normalizePhoneValue(value: string): string | null {
+  const fullPhone = extractPhoneAnswer(value);
+  if (fullPhone) {
+    return fullPhone;
+  }
+
+  const barePhone = normalizePhoneText(value).match(/(?<!\d)(\d{7,8})(?!\d)/u)?.[1];
+  return barePhone ? `028-${barePhone}` : null;
+}
+
 function extractEmailAnswer(markdown: string): string | null {
   const match = markdown.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/iu);
   return match?.[0] ?? null;
@@ -740,7 +750,10 @@ function extractFocusedTableAnswer(
       .reverse()
       .find((candidate) => {
         const joined = candidate.join("");
-        return /(科室|部门|名称)/.test(joined) && /(办公地点|地点|地址|电话|联系方式|工作人员|人员)/.test(joined);
+        return (
+          /(科室|部门|名称|职务)/.test(joined) &&
+          /(办公室|办公地点|地点|地址|电话|联系方式|工作人员|人员|姓名)/.test(joined)
+        );
       });
 
     if (!header) {
@@ -748,26 +761,31 @@ function extractFocusedTableAnswer(
     }
 
     const intent = detectQuestionIntent(question);
-    const locationIndex = header.findIndex((cell) => /(办公地点|地点|地址)/.test(cell));
+    const titleIndex = header.findIndex((cell) => /(科室|部门|名称|职务)/.test(cell));
+    const locationIndex = header.findIndex((cell) => /(办公室|办公地点|地点|地址)/.test(cell));
     const phoneIndex = header.findIndex((cell) => /(办公电话|联系电话|电话|联系方式)/.test(cell));
-    const staffIndex = header.findIndex((cell) => /(工作人员|人员)/.test(cell));
+    const staffIndex = header.findIndex((cell) => /(工作人员|人员|姓名)/.test(cell));
+    const title = titleIndex >= 0 ? row[titleIndex] : focusTerms.find((term) => row.some((cell) => cell.includes(term)));
+    const location = locationIndex >= 0 ? row[locationIndex] : "";
+    const staff = staffIndex >= 0 ? row[staffIndex] : "";
+    const phone = phoneIndex >= 0 ? normalizePhoneValue(row[phoneIndex] ?? "") : normalizePhoneValue(row.join(" "));
 
-    if (intent === "location" && locationIndex >= 0 && row[locationIndex]) {
-      return cleanAnswerText(`办公地点：${row[locationIndex]}`);
+    if (intent === "location" && location) {
+      return cleanAnswerText(`${title ? `${title}办公地点：` : "办公地点："}${location}${phone ? `，联系电话：${phone}` : ""}${staff ? `，负责人/工作人员：${staff}` : ""}`);
     }
 
-    if (intent === "phone" && phoneIndex >= 0 && row[phoneIndex]) {
-      return cleanAnswerText(`联系电话：${row[phoneIndex]}`);
+    if (intent === "phone" && phone) {
+      return cleanAnswerText(`${title ? `${title}联系电话：` : "联系电话："}${phone}${location ? `，办公室：${location}` : ""}${staff ? `，负责人/工作人员：${staff}` : ""}`);
     }
 
     if (/工作人员|人员/.test(question) && staffIndex >= 0 && row[staffIndex]) {
-      return cleanAnswerText(`工作人员：${row[staffIndex]}`);
+      return cleanAnswerText(`${title ? `${title}工作人员：` : "工作人员："}${row[staffIndex]}${location ? `，办公室：${location}` : ""}${phone ? `，联系电话：${phone}` : ""}`);
     }
 
     if (intent === "phone") {
-      const phone = extractPhoneAnswer(row.join(" "));
-      if (phone) {
-        return cleanAnswerText(`联系电话：${phone}`);
+      const fallbackPhone = normalizePhoneValue(row.join(" "));
+      if (fallbackPhone) {
+        return cleanAnswerText(`联系电话：${fallbackPhone}`);
       }
     }
   }
@@ -1123,7 +1141,7 @@ function buildFocusWindows(lines: string[], focusTerms: string[]): string[] {
     }
 
     const start = Math.max(0, index - 3);
-    const end = Math.min(lines.length, index + 8);
+    const end = Math.min(lines.length, index + 40);
     const key = `${start}:${end}`;
     if (usedRanges.has(key)) {
       continue;
@@ -1256,6 +1274,10 @@ function extractHeuristicAnswer(
     return focusedAnswer;
   }
 
+  if (focusTerms.length > 0) {
+    return null;
+  }
+
   if (detectQuestionIntent(question) === "location") {
     const directAnswer =
       extractParentheticalLocationAnswer(markdown) ??
@@ -1313,8 +1335,8 @@ function scoreExtractedAnswer(params: {
     if (/(行政保障中心|教学楼|办公楼|实验楼|[A-Z]?\d{3,4}|[一二三四五六七八九十]楼)/.test(answerText)) {
       score += 20;
     }
-    if (/(邮编|版权所有|成都市外东十陵成都大学)/.test(answerText)) {
-      score -= 35;
+    if (/(邮编|版权所有|成都市外东十陵|成洛路2025号)/.test(answerText)) {
+      score -= 60;
     }
   }
 
@@ -1379,7 +1401,7 @@ function extractQuestionFocusTerms(question: string, matchedSiteName: string): s
   const parentheticalFocusTerms = [...normalizedSiteName.matchAll(/\(([^)]+)\)/g)]
     .flatMap((match) => (match[1] ?? "").split(/[、,，/]/))
     .map((item) => item.trim())
-    .filter((item) => item && question.includes(item) && /(科|室|中心|办公室|部门)$/.test(item));
+    .filter((item) => item && question.includes(item) && /(科|室|中心|办公室|部门|部)$/.test(item));
 
   if (parentheticalFocusTerms.length > 0) {
     return [...new Set(parentheticalFocusTerms)];
@@ -1394,8 +1416,13 @@ function extractQuestionFocusTerms(question: string, matchedSiteName: string): s
     remainder = remainder.replace(alias, " ");
   }
 
-  const cleaned = remainder
-    .replace(/工资福利科/g, "劳资科")
+  let cleanedRemainder = remainder.replace(/工资福利科/g, "劳资科");
+  if (matchedSiteName.includes("信息网络中心")) {
+    cleanedRemainder = cleanedRemainder.replace(/(网络中心|信息中心)/g, " ");
+  }
+
+  const cleaned = cleanedRemainder
+    .replace(/成都大学/g, " ")
     .replace(/(请问|麻烦|帮我|一下|告诉我|查询|查一下|列一个|清单|列表)/g, " ")
     .replace(/(在哪里|在哪|哪里|地址|位置|办公地点|办公地址|办公位置|地点)/g, " ")
     .replace(/(电话|联系电话|联系方式|号码|邮箱|电子邮箱|email)/gi, " ")
@@ -1403,7 +1430,7 @@ function extractQuestionFocusTerms(question: string, matchedSiteName: string): s
     .replace(/[的呢吗呀啊]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  const matches = [...cleaned.matchAll(/[\u4e00-\u9fa5]{1,12}(?:科|室|中心|办公室|部门)/g)]
+  const matches = [...cleaned.matchAll(/[\u4e00-\u9fa5]{1,12}(?:科|室|中心|办公室|部门|部)/g)]
     .map((match) => match[0]?.trim() ?? "")
     .filter(Boolean);
 
@@ -2228,29 +2255,38 @@ export class FirecrawlApiAdapter implements FirecrawlAdapter {
       headers.Authorization = `Bearer ${this.apiKey}`;
     }
 
-    const response = await fetch(`${this.baseUrl}/v2/scrape`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        url,
-        formats,
-        onlyMainContent: false
-      })
-    });
+    let lastError: Error | null = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const response = await fetch(`${this.baseUrl}/v2/scrape`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          url,
+          formats,
+          onlyMainContent: false
+        })
+      });
 
-    if (!response.ok) {
-      const details = await response.text();
-      throw new Error(
-        `Firecrawl scrape failed (${response.status}) for ${url}: ${details.slice(0, 300)}`
-      );
+      if (!response.ok) {
+        const details = await response.text();
+        lastError = new Error(
+          `Firecrawl scrape failed (${response.status}) for ${url}: ${details.slice(0, 300)}`
+        );
+        await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+        continue;
+      }
+
+      const payload = (await response.json()) as ScrapeResponse;
+      if (!payload || typeof payload !== "object" || !payload.data) {
+        lastError = new Error(`Firecrawl returned an unexpected payload for ${url}`);
+        await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+        continue;
+      }
+
+      return payload;
     }
 
-    const payload = (await response.json()) as ScrapeResponse;
-    if (!payload || typeof payload !== "object" || !payload.data) {
-      throw new Error(`Firecrawl returned an unexpected payload for ${url}`);
-    }
-
-    return payload;
+    throw lastError ?? new Error(`Firecrawl scrape failed for ${url}`);
   }
 
   private async fetchPageHtml(url: string): Promise<string> {

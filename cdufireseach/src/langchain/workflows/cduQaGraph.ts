@@ -51,6 +51,17 @@ type MemoryDecision = {
   reason?: string;
 };
 
+function shouldKeepStructuredBaseAnswer(baseAnswer: string, refinedAnswer?: string): boolean {
+  const refined = refinedAnswer?.trim();
+  if (!refined) {
+    return true;
+  }
+
+  const baseHasContext = /(办公室|办公地点|负责人|工作人员|联系电话：|电话：)/.test(baseAnswer);
+  const refinedLostContext = !/(办公室|办公地点|负责人|工作人员|联系电话：|电话：)/.test(refined);
+  return baseHasContext && refinedLostContext;
+}
+
 function summarizeCatalogSites(raw: string, limit: number): string {
   const parsed = JSON.parse(raw) as {
     sites?: Array<{ name?: string; category?: string; website_url?: string }>;
@@ -397,7 +408,9 @@ export async function runCduQaGraph(
                 typeof refined.answered === "boolean"
                   ? refined.answered
                   : baseResult.answered,
-              answer: refined.answer?.trim() || baseResult.answer,
+              answer: shouldKeepStructuredBaseAnswer(baseResult.answer, refined.answer)
+                ? baseResult.answer
+                : refined.answer?.trim() || baseResult.answer,
               evidence: refined.evidence?.trim() || baseResult.evidence
             },
             workflowSteps: [
